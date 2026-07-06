@@ -1,0 +1,29 @@
+version: '3.8'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: formmitra
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: formmitra_db
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: ./server
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://formmitra:password@postgres:5432/formmitra_db
+      - MISTRAL_API_KEY=your_mistral_key
+
+  frontend:
+    build: ./client
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/api/ws
+
+      

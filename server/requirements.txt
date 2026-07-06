@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+websockets
+mistralai
+python-multipart
+pdfplumber
+python-dotenv
+pypdf
+reportlab

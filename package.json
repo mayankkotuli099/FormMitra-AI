@@ -1,0 +1,12 @@
+{
+  "dependencies": {
+    "framer-motion": "^12.42.2",
+    "lucide-react": "^1.23.0",
+    "react-pdf": "^9.1.1",
+    "react-speech-recognition": "^4.0.1",
+    "regenerator-runtime": "^0.14.1"
+  },
+  "devDependencies": {
+    "@types/react-speech-recognition": "^3.9.6"
+  }
+}
