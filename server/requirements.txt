@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 websockets
-mistralai
+mistralai==1.10.0
 python-multipart
 pdfplumber
 python-dotenv
