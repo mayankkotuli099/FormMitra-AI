@@ -7,3 +7,4 @@ pdfplumber
 python-dotenv
 pypdf
 reportlab
+python-dateutil

@@ -1,4 +1,4 @@
-#!/Users/mayankkotuli/Desktop/FormMitra AI main 3/server/venv/bin/python3
+#!/Users/mayankkotuli/Desktop/FormMitra AI/server/venv/bin/python3
 """Extract pdf structure in XML format"""
 
 import logging

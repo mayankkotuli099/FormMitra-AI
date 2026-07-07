@@ -24,10 +24,12 @@ const DUPLICATE_TRANSCRIPT_WINDOW_MS = 2000;
 const CONNECTION_STATUS_MESSAGE = "Connected Successfully";
 
 export default function useConversation() {
-  const socket = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectAttempt = useRef(0);
-  const intentionalClose = useRef(false);
+  // Deliberately NOT a single persistent useRef shared across every
+  // reconnect. Only lastTranscript needs to survive across the whole
+  // component lifetime (it's just a debounce window). The reconnect
+  // machinery (socket / intentionalClose / reconnectAttempt / reconnectTimer)
+  // is created fresh inside each effect run instead, scoped to that run's
+  // sessionId — see the useEffect below for why.
   const lastTranscript = useRef<{ text: string; at: number } | null>(null);
 
   const sessionId = useFormStore((state) => state.sessionId);
@@ -50,24 +52,37 @@ export default function useConversation() {
   useEffect(() => {
     if (!sessionId) return;
 
-    intentionalClose.current = false;
-    reconnectAttempt.current = 0;
+    // Scoped to THIS effect run (i.e. this sessionId) only. Previously
+    // these lived in useRefs shared across every reconnect, which meant a
+    // fast session change (Start New Form, or navigating back from
+    // Credits and getting a new session) could let the OLD socket's async
+    // onclose fire *after* the new effect run had already reset
+    // intentionalClose to false — so the old, now-stale connection would
+    // schedule its own stray reconnect to the old session, alongside the
+    // fresh connection to the new one. Two live sockets both writing
+    // fields/progress into the store is exactly the "opens and closes,
+    // fields flicker" symptom, and a stray reconnect to an old/expired
+    // session is exactly the "WebSocket Error: {}" on the way back from
+    // Credits. Keeping this state local to each effect run means an old
+    // run's callbacks can never step on a newer run's state.
+    let socket: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+    let intentionalClose = false;
 
     const connect = () => {
-      if (socket.current) {
-        socket.current.close();
-      }
+      if (intentionalClose) return;
 
       const ws = new WebSocket(
         `${process.env.NEXT_PUBLIC_WS}/${sessionId}`
       );
 
-      socket.current = ws;
+      socket = ws;
 
       ws.onopen = () => {
         console.log("✅ WebSocket Connected");
 
-        reconnectAttempt.current = 0;
+        reconnectAttempt = 0;
 
         setSendTranscript(
           (text: string, language: string) => {
@@ -127,7 +142,16 @@ export default function useConversation() {
       };
 
       ws.onerror = (err) => {
-        console.error("❌ WebSocket Error:", err);
+        // Deliberately console.warn, not console.error. A WebSocket
+        // "error" event is, by browser design, an empty/non-descriptive
+        // Event — the real reason always arrives via onclose right
+        // after this, which is what actually drives reconnect logic
+        // below. console.error here would additionally pop Next.js's
+        // dev-mode red error overlay on every transient blip (a page
+        // navigating away mid-connection, a dev-server hot reload, a
+        // brief network drop) even though the app already recovers
+        // gracefully from all of those on its own.
+        console.warn("⚠️ WebSocket error (see onclose for the real reason):", err);
         setThinking(false);
       };
 
@@ -139,31 +163,33 @@ export default function useConversation() {
         // Reconnect on unexpected drops (network blip, server restart)
         // with capped exponential backoff. A deliberate close (session
         // change / component unmount) skips this entirely so we never
-        // fight the effect's own cleanup.
-        if (intentionalClose.current) return;
+        // fight the effect's own cleanup. Because intentionalClose lives
+        // in this effect run's own closure now (not a shared ref), a
+        // stale/old run can never have its flag overwritten by a newer run.
+        if (intentionalClose) return;
 
         const delay = Math.min(
-          1000 * 2 ** reconnectAttempt.current,
+          1000 * 2 ** reconnectAttempt,
           MAX_RECONNECT_DELAY_MS
         );
 
-        reconnectAttempt.current += 1;
+        reconnectAttempt += 1;
 
-        reconnectTimer.current = setTimeout(connect, delay);
+        reconnectTimer = setTimeout(connect, delay);
       };
     };
 
     connect();
 
     return () => {
-      intentionalClose.current = true;
+      intentionalClose = true;
 
-      if (reconnectTimer.current) {
-        clearTimeout(reconnectTimer.current);
-        reconnectTimer.current = null;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
 
-      socket.current?.close();
+      socket?.close();
     };
   }, [
     sessionId,

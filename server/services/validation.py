@@ -7,6 +7,10 @@ is asked again instead of being silently saved.
 
 import re
 
+from typing import Optional
+
+from dateutil import parser as _date_parser
+
 _PATTERNS = {
     "email": re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$"),
     "phone": re.compile(r"^[6-9]\d{9}$"),
@@ -40,6 +44,32 @@ def _normalize(field_type: str, value: str) -> str:
     return value
 
 
+def _normalize_date(value: str) -> Optional[str]:
+    """
+    Accepts a date of birth (or any date field) either typed numerically
+    (17/06/2026) or spoken naturally the way someone would actually say it
+    out loud — "17 June 2026", "June 17 2026", "17th June 2026" — and
+    returns it normalized to DD/MM/YYYY. Returns None if the value doesn't
+    contain a recognizable date at all, so the caller can fall back to
+    asking the user to repeat it.
+
+    dayfirst=True so an ambiguous all-numeric date like 5/6/2025 is read
+    as 5 June (Indian convention) rather than May 6th.
+    """
+
+    value = value.strip()
+
+    if not value:
+        return None
+
+    try:
+        parsed = _date_parser.parse(value, dayfirst=True, fuzzy=True)
+    except (ValueError, OverflowError):
+        return None
+
+    return parsed.strftime("%d/%m/%Y")
+
+
 def validate_field(field_type: str, value: str):
     """
     Returns (is_valid: bool, normalized_value: str, error_message: str|None)
@@ -53,6 +83,14 @@ def validate_field(field_type: str, value: str):
 
     if field_type not in _PATTERNS:
         return True, value.strip(), None
+
+    if field_type == "date":
+        normalized_date = _normalize_date(value)
+
+        if normalized_date:
+            return True, normalized_date, None
+
+        return False, value, _ERROR_MESSAGES["date"]
 
     normalized = _normalize(field_type, value)
     pattern = _PATTERNS[field_type]

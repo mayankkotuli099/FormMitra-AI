@@ -67,6 +67,20 @@ export default function Home() {
     };
 
     init();
+
+    // sessionId lives in a store outside React, so it survives this
+    // component unmounting (e.g. navigating to /credits). Without this,
+    // navigating back re-mounts Home with that OLD sessionId still set —
+    // useConversation's effect fires on the very first render and tries
+    // to open a WebSocket to that now-expired session before the "init"
+    // above has even had a chance to request a fresh one, which is
+    // exactly the "WebSocket Error" seen when coming back from Credits.
+    // Clearing it here means the re-mounted Home always starts from an
+    // empty sessionId (no connection attempt at all) until a fresh,
+    // valid one comes back from /session.
+    return () => {
+      setSessionId("");
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
