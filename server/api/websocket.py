@@ -13,6 +13,33 @@ logger = logging.getLogger("formmitra")
 
 router = APIRouter()
 
+# Shown instead of ever calling the LLM when the user talks before
+# uploading a form (fields is still empty). Without this, the model was
+# given an empty known/missing list and — despite the system prompt only
+# ever *illustrating* "What is your Full Name?" as an example, not an
+# instruction to use when there's no form — it would fall back to
+# improvising that exact generic flow rather than saying there's simply
+# nothing to fill in yet. This is a deterministic guard instead: no form,
+# no LLM call, just a direct nudge to upload one, in the user's language.
+#
+# Best-effort translations — good enough to be understood, but not
+# reviewed by native speakers for every language. Worth a native-speaker
+# pass before relying on these for anything more than this one message.
+NO_FORM_MESSAGES = {
+    "en-IN": "Please upload your form first — then I can help you fill it out.",
+    "hi-IN": "कृपया पहले अपना फॉर्म अपलोड करें, फिर मैं आपकी मदद करूंगा।",
+    "bn-IN": "অনুগ্রহ করে প্রথমে আপনার ফর্ম আপলোড করুন, তারপর আমি আপনাকে সাহায্য করব।",
+    "gu-IN": "કૃપા કરી પહેલા તમારું ફોર્મ અપલોડ કરો, પછી હું તમારી મદદ કરીશ.",
+    "mr-IN": "कृपया आधी तुमचा फॉर्म अपलोड करा, मग मी तुम्हाला मदत करेन.",
+    "ta-IN": "முதலில் உங்கள் படிவத்தை பதிவேற்றவும், பிறகு நான் உதவுகிறேன்.",
+    "te-IN": "దయచేసి ముందుగా మీ ఫారమ్‌ని అప్‌లోడ్ చేయండి, తర్వాత నేను సహాయం చేస్తాను.",
+    "kn-IN": "ದಯವಿಟ್ಟು ಮೊದಲು ನಿಮ್ಮ ಫಾರ್ಮ್ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ, ನಂತರ ನಾನು ಸಹಾಯ ಮಾಡುತ್ತೇನೆ.",
+    "ml-IN": "ദയവായി ആദ്യം നിങ്ങളുടെ ഫോം അപ്‌ലോഡ് ചെയ്യുക, പിന്നീട് ഞാൻ സഹായിക്കാം.",
+    "pa-IN": "ਕਿਰਪਾ ਕਰਕੇ ਪਹਿਲਾਂ ਆਪਣਾ ਫਾਰਮ ਅੱਪਲੋਡ ਕਰੋ, ਫਿਰ ਮੈਂ ਤੁਹਾਡੀ ਮਦਦ ਕਰਾਂਗਾ।",
+    "or-IN": "ଦୟାକରି ପ୍ରଥମେ ଆପଣଙ୍କର ଫର୍ମ ଅପଲୋଡ୍ କରନ୍ତୁ, ତାପରେ ମୁଁ ସାହାଯ୍ୟ କରିବି।",
+    "as-IN": "অনুগ্ৰহ কৰি প্ৰথমে আপোনাৰ ফৰ্ম আপল’ড কৰক, তাৰ পাছত মই সহায় কৰিম।",
+}
+
 
 def _normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
@@ -117,6 +144,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 fields = live_session["fields"]
 
                 logger.info(f"Transcript received: {transcript!r}")
+
+                if not fields:
+                    # Nothing uploaded yet in this session — don't waste
+                    # an LLM call (or risk it improvising a generic
+                    # "what's your name" flow); just tell the user what
+                    # to do next.
+                    await websocket.send_json({
+                        "message": NO_FORM_MESSAGES.get(
+                            language, NO_FORM_MESSAGES["en-IN"]
+                        ),
+                        "fields": [],
+                        "completed": False,
+                        "progress": 0,
+                    })
+                    continue
 
                 result = agent.process(
                     transcript=transcript,

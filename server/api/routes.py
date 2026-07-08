@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form
 from services.ocr_service import extract_form_fields
+from services.stt_service import transcribe_audio
 from services.session_manager import (
     create_session,
     get_session,
@@ -282,6 +283,35 @@ async def set_session_language(session_id: str, language: str = Form(...)):
 
     return {
         "success": True,
+    }
+
+
+@router.post("/stt")
+async def speech_to_text(
+    file: UploadFile = File(...),
+    language: str = Form(...),
+):
+    """
+    Used only for languages the browser's own speech recognition
+    doesn't reliably support (see VoiceOrb.tsx) — Hindi/English keep
+    using the free, unlimited browser engine and never hit this route.
+    """
+
+    audio_bytes = await file.read()
+
+    success, result, limit_reached = transcribe_audio(
+        audio_bytes=audio_bytes,
+        filename=file.filename or "audio.webm",
+        language_code=language,
+    )
+
+    if success:
+        return {"success": True, "transcript": result}
+
+    return {
+        "success": False,
+        "message": result,
+        "limit_reached": limit_reached,
     }
 
 

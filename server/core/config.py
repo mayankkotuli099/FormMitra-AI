@@ -11,6 +11,11 @@ load_dotenv()
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
 
+# Only used as a fallback for regional-language voice input where the
+# browser's own speech recognition is unreliable (see stt_service.py
+# and VoiceOrb.tsx) — Hindi/English keep using the free browser engine.
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", os.path.join(BASE_DIR, "uploads"))
