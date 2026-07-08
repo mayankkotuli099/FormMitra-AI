@@ -11,6 +11,7 @@ import SpeechRecognition, {
 } from "react-speech-recognition";
 
 import { api } from "@/lib/api";
+import { WavRecorder } from "@/lib/wavRecorder";
 import { useConversationStore } from "@/store/useConversationStore";
 import { useLanguageStore } from "@/store/useLanguageStore";
 
@@ -42,35 +43,12 @@ const ERROR_MESSAGES: Record<string, string> = {
 const GENERIC_VOICE_ERROR =
   "Voice recognition hit a problem. Please try again or type your answer.";
 
-// Picks a format Sarvam actually accepts and that this browser can
-// record in — falls back through the list rather than hardcoding one,
-// since supported MediaRecorder mime types vary by browser.
-function pickSupportedMimeType(): string {
-  const candidates = ["audio/webm", "audio/mp4", "audio/ogg"];
-
-  for (const type of candidates) {
-    if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(type)) {
-      return type;
-    }
-  }
-
-  return "";
-}
-
-function extensionForMimeType(mimeType: string): string {
-  if (mimeType.includes("mp4")) return "m4a";
-  if (mimeType.includes("ogg")) return "ogg";
-  return "webm";
-}
-
 export default function VoiceOrb() {
   const [mounted, setMounted] = useState(false);
   const [recording, setRecording] = useState(false);
   const [uploading, setUploading] = useState(false);
 
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<WavRecorder | null>(null);
 
   const language = useLanguageStore((state) => state.language);
   const useBrowserSTT = BROWSER_STT_LANGUAGES.has(language);
@@ -97,8 +75,13 @@ export default function VoiceOrb() {
   // doesn't stay lit in the browser tab.
   useEffect(() => {
     return () => {
-      mediaRecorderRef.current?.stop();
-      streamRef.current?.getTracks().forEach((t) => t.stop());
+      if (recorderRef.current) {
+        try {
+          recorderRef.current.stop();
+        } catch {
+          // Already stopped/never started — nothing to clean up.
+        }
+      }
     };
   }, []);
 
@@ -148,80 +131,17 @@ export default function VoiceOrb() {
   if (!mounted) return null;
 
   const startRecording = async () => {
-    const mimeType = pickSupportedMimeType();
-
-    if (typeof MediaRecorder === "undefined" || !mimeType) {
+    if (typeof window === "undefined" || !navigator.mediaDevices?.getUserMedia) {
       toast.error(
-        "Voice input isn't supported in this browser for this language. Please type your answer instead."
+        "Voice input isn't supported in this browser. Please type your answer instead."
       );
       return;
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-      });
-
-      streamRef.current = stream;
-      audioChunksRef.current = [];
-
-      const recorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = async () => {
-        streamRef.current?.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-
-        const blob = new Blob(audioChunksRef.current, { type: mimeType });
-        audioChunksRef.current = [];
-        setRecording(false);
-
-        // A near-empty recording means the mic was tapped and
-        // immediately stopped — nothing worth sending.
-        if (blob.size < 2000) return;
-
-        setUploading(true);
-
-        try {
-          const formData = new FormData();
-          formData.append(
-            "file",
-            blob,
-            `recording.${extensionForMimeType(mimeType)}`
-          );
-          formData.append("language", language);
-
-          const res = await api.post("/stt", formData, {
-            headers: { "Content-Type": "multipart/form-data" },
-          });
-
-          if (res.data.success) {
-            const text = res.data.transcript as string;
-            console.log("🎤", text);
-
-            if (sendTranscript) {
-              useConversationStore.getState().addUserMessage(text);
-              useConversationStore.getState().setThinking(true);
-              sendTranscript(text, language);
-            }
-          } else {
-            toast.error(res.data.message || GENERIC_VOICE_ERROR);
-          }
-        } catch (err) {
-          console.error(err);
-          toast.error(GENERIC_VOICE_ERROR);
-        } finally {
-          setUploading(false);
-        }
-      };
-
-      recorder.start();
+      const recorder = new WavRecorder();
+      await recorder.start();
+      recorderRef.current = recorder;
       setRecording(true);
     } catch (err) {
       console.error(err);
@@ -231,8 +151,49 @@ export default function VoiceOrb() {
     }
   };
 
-  const stopRecording = () => {
-    mediaRecorderRef.current?.stop();
+  const stopRecording = async () => {
+    const recorder = recorderRef.current;
+    if (!recorder) return;
+
+    setRecording(false);
+
+    const blob = recorder.stop();
+    recorderRef.current = null;
+
+    // A near-empty recording means the mic was tapped and immediately
+    // stopped — nothing worth sending. (44 bytes is just the WAV
+    // header with zero audio samples.)
+    if (blob.size <= 44) return;
+
+    setUploading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", blob, "recording.wav");
+      formData.append("language", language);
+
+      const res = await api.post("/stt", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      if (res.data.success) {
+        const text = res.data.transcript as string;
+        console.log("🎤", text);
+
+        if (sendTranscript) {
+          useConversationStore.getState().addUserMessage(text);
+          useConversationStore.getState().setThinking(true);
+          sendTranscript(text, language);
+        }
+      } else {
+        toast.error(res.data.message || GENERIC_VOICE_ERROR);
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error(GENERIC_VOICE_ERROR);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const toggleMic = async () => {
@@ -251,7 +212,7 @@ export default function VoiceOrb() {
     }
 
     if (recording) {
-      stopRecording();
+      await stopRecording();
     } else {
       await startRecording();
     }
