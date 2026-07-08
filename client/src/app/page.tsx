@@ -17,6 +17,8 @@ import TranscriptInput from "@/components/TranscriptInput";
 import ProgressSidebar from "@/components/ProgressSidebar";
 import LiveFormViewer from "@/components/LiveFormViewer";
 import DownloadButton from "@/components/DownloadButton";
+import ReadBackButton from "@/components/ReadBackButton";
+import ShareOnWhatsApp from "@/components/ShareOnWhatsApp";
 
 import useConversation from "@/hooks/useConversation";
 
@@ -102,7 +104,9 @@ export default function Home() {
         <div className="space-y-6">
           <ProgressSidebar />
           <LiveFormViewer />
+          <ReadBackButton />
           <DownloadButton />
+          <ShareOnWhatsApp />
         </div>
       </div>
     </main>
