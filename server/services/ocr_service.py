@@ -19,8 +19,10 @@ import re
 import json
 import difflib
 import logging
-
+import base64
 import pdfplumber
+import tempfile
+import os
 from mistralai import Mistral
 
 from core.config import MISTRAL_API_KEY, MISTRAL_MODEL
@@ -121,7 +123,42 @@ def extract_text(pdf_path: str):
             if t:
                 text += t + "\n"
 
-    return clean(text)
+    text = clean(text)
+
+    # Scanned/photographed PDF (form bhara hua photo se PDF banaya) me
+    # koi real text layer nahi hota — pdfplumber ko kuch nahi milta,
+    # isliye AI ko form khaali lagta tha aur wo shuruvaat se puchta tha.
+    if len(text) < 40:
+        ocr_text = _ocr_scanned_pdf(pdf_path)
+        if ocr_text:
+            return ocr_text
+
+    return text
+
+
+def _ocr_scanned_pdf(pdf_path: str) -> str:
+    if _client is None:
+        return ""
+
+    combined = []
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                tmp_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False).name
+                try:
+                    page.to_image(resolution=200).original.save(tmp_path, "PNG")
+                    page_text = mistral_ocr_image_text(tmp_path)
+                    if page_text:
+                        combined.append(page_text)
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+    except Exception as e:
+        logger.warning(f"Scanned PDF OCR failed ({e})")
+        return ""
+
+    return clean("\n".join(combined))
 
 
 # ---------------------------------------------------------------------------

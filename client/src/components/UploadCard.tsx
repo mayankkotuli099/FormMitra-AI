@@ -27,7 +27,7 @@ export default function UploadCard() {
       <input
         id="pdf-upload"
         type="file"
-        accept=".pdf"
+        accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif"
         className="hidden"
         onChange={handleFile}
         disabled={loading}
