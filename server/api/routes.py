@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form
-from services.ocr_service import extract_form_fields
+from PIL import Image
+from services.ocr_service import extract_form_fields, mistral_ocr_image_text
 from services.stt_service import transcribe_audio
 from services.session_manager import (
     create_session,
@@ -19,6 +20,26 @@ import logging
 logger = logging.getLogger("formmitra")
 
 MAX_UPLOAD_BYTES = int(MAX_UPLOAD_MB * 1024 * 1024)
+
+ALLOWED_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "tiff", "tif", "bmp", "heic", "heif"}
+
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pillow_heif = None
+
+
+def _convert_image_to_pdf(image_path: str, pdf_path: str) -> bool:
+    try:
+        img = Image.open(image_path)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.save(pdf_path, "PDF", resolution=150.0)
+        return True
+    except Exception as e:
+        logger.warning(f"Image-to-PDF conversion failed: {e}")
+        return False
 
 
 def _build_opening_message(fields: list) -> str:
@@ -106,22 +127,21 @@ async def upload(
     original_name = file.filename or ""
     extension = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else ""
 
-    if extension != "pdf":
+    is_pdf = extension == "pdf"
+    is_image = extension in ALLOWED_IMAGE_EXTENSIONS
+
+    if not is_pdf and not is_image:
         return {
             "success": False,
-            "message": "Unsupported file type. Please upload a PDF.",
+            "message": "Unsupported file type. Please upload a PDF, JPG, PNG, WEBP, TIFF, BMP, or HEIC/HEIF image.",
         }
 
-    filename = f"{uuid.uuid4()}.pdf"
-
-    filepath = os.path.join(
-        UPLOAD_FOLDER,
-        filename,
-    )
+    raw_filename = f"{uuid.uuid4()}.{extension}"
+    raw_filepath = os.path.join(UPLOAD_FOLDER, raw_filename)
 
     size = 0
     try:
-        with open(filepath, "wb") as buffer:
+        with open(raw_filepath, "wb") as buffer:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -131,7 +151,7 @@ async def upload(
 
                 if size > MAX_UPLOAD_BYTES:
                     buffer.close()
-                    os.remove(filepath)
+                    os.remove(raw_filepath)
                     return {
                         "success": False,
                         "message": f"File is too large. Maximum size is {int(MAX_UPLOAD_MB)}MB.",
@@ -139,25 +159,54 @@ async def upload(
 
                 buffer.write(chunk)
     except Exception:
-        if os.path.exists(filepath):
-            os.remove(filepath)
+        if os.path.exists(raw_filepath):
+            os.remove(raw_filepath)
         return {
             "success": False,
             "message": "Could not read the uploaded file. Please try again.",
         }
 
-    # A real PDF must start with the "%PDF-" magic bytes — this catches
-    # files that were merely renamed to .pdf before they ever reach the
-    # (slow, external-API-backed) OCR pipeline.
-    with open(filepath, "rb") as f:
-        header = f.read(5)
+    ocr_text_override = None
 
-    if header != b"%PDF-":
-        os.remove(filepath)
-        return {
-            "success": False,
-            "message": "This doesn't look like a valid PDF file.",
-        }
+    if is_pdf:
+        # A real PDF must start with the "%PDF-" magic bytes — this
+        # catches files that were merely renamed to .pdf.
+        with open(raw_filepath, "rb") as f:
+            header = f.read(5)
+
+        if header != b"%PDF-":
+            os.remove(raw_filepath)
+            return {
+                "success": False,
+                "message": "This doesn't look like a valid PDF file.",
+            }
+
+        filename = raw_filename
+        filepath = raw_filepath
+    else:
+        if extension in ("heic", "heif") and pillow_heif is None:
+            os.remove(raw_filepath)
+            return {
+                "success": False,
+                "message": "HEIC/HEIF images aren't supported on this server yet. Please upload a JPG, PNG, or WEBP instead.",
+            }
+
+        # Run OCR on the original photo/scan, then wrap it in a one-page
+        # PDF so the rest of the pipeline (session storage, coordinate
+        # detection, "generate filled PDF") needs no changes at all.
+        ocr_text_override = mistral_ocr_image_text(raw_filepath)
+
+        filename = f"{uuid.uuid4()}.pdf"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+
+        converted = _convert_image_to_pdf(raw_filepath, filepath)
+        os.remove(raw_filepath)
+
+        if not converted:
+            return {
+                "success": False,
+                "message": "Could not read that image. Please try a different photo or scan.",
+            }
 
     # Feature — debounce/dedupe: if this is byte-for-byte the same file
     # this session already ran through OCR (e.g. an accidental double
@@ -172,7 +221,7 @@ async def upload(
         logger.info("Duplicate upload detected — reusing cached OCR result (debounced)")
         result = session["last_upload_result"]
     else:
-        result = extract_form_fields(filepath)
+        result = extract_form_fields(filepath, raw_text_override=ocr_text_override)
         session["last_upload_hash"] = content_hash
         session["last_upload_result"] = result
 

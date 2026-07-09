@@ -16,13 +16,15 @@ Pipeline:
 """
 
 import re
+import os
 import json
 import difflib
 import logging
-import base64
-import pdfplumber
 import tempfile
-import os
+import base64
+
+import pdfplumber
+from pypdf import PdfReader
 from mistralai import Mistral
 
 from core.config import MISTRAL_API_KEY, MISTRAL_MODEL
@@ -105,7 +107,7 @@ def looks_like_a_form(text: str, form_name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Text extraction (existing, working — left untouched)
+# Text extraction
 # ---------------------------------------------------------------------------
 
 def clean(text: str):
@@ -125,9 +127,12 @@ def extract_text(pdf_path: str):
 
     text = clean(text)
 
-    # Scanned/photographed PDF (form bhara hua photo se PDF banaya) me
-    # koi real text layer nahi hota — pdfplumber ko kuch nahi milta,
-    # isliye AI ko form khaali lagta tha aur wo shuruvaat se puchta tha.
+    # A PDF made from a scan/photo (e.g. someone filled the form by hand
+    # then scanned or photographed it) has no real text layer at all —
+    # pdfplumber finds nothing, so every field looked "empty" even when
+    # the form was already partially filled, and the AI started asking
+    # from scratch. Detect that case and run real OCR on each page image
+    # instead, the same way a direct photo upload is handled.
     if len(text) < 40:
         ocr_text = _ocr_scanned_pdf(pdf_path)
         if ocr_text:
@@ -137,6 +142,12 @@ def extract_text(pdf_path: str):
 
 
 def _ocr_scanned_pdf(pdf_path: str) -> str:
+    """
+    Renders each page of a scanned/photographed PDF as an image and runs
+    real OCR on it (mistral_ocr_image_text), since there's no text layer
+    for pdfplumber to read directly.
+    """
+
     if _client is None:
         return ""
 
@@ -159,6 +170,45 @@ def _ocr_scanned_pdf(pdf_path: str) -> str:
         return ""
 
     return clean("\n".join(combined))
+
+
+def mistral_ocr_image_text(image_path: str) -> str:
+    """
+    Runs Mistral's OCR endpoint on an uploaded photo/scan (JPG, PNG,
+    WEBP, HEIC/HEIF, or a single rendered page of a scanned PDF).
+    pdfplumber only reads text already embedded in a PDF, so a camera
+    photo needs a real OCR pass instead — this returns text in the same
+    shape as extract_text() so the rest of the pipeline needs no changes.
+    """
+
+    if _client is None:
+        return ""
+
+    try:
+        ext = image_path.rsplit(".", 1)[-1].lower()
+        mime_map = {"jpg": "jpeg", "tif": "tiff"}
+        mime = mime_map.get(ext, ext)
+
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        response = call_with_retry(
+            lambda: _client.ocr.process(
+                model="mistral-ocr-latest",
+                document={
+                    "type": "image_url",
+                    "image_url": f"data:image/{mime};base64,{b64}",
+                },
+            ),
+            operation_name="Image OCR",
+        )
+
+        text = "\n".join(page.markdown for page in response.pages if page.markdown)
+        return clean(text)
+
+    except Exception as e:
+        logger.warning(f"Image OCR unavailable ({e})")
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -630,10 +680,71 @@ def mistral_extract(text: str):
 
 
 # ---------------------------------------------------------------------------
-# Public entrypoint (signature unchanged — routes.py keeps working as-is)
+# Pre-filled PDF form field detection (Bug fix — partially filled PDFs)
+# ---------------------------------------------------------------------------
+#
+# A PDF that already has real AcroForm fields with values (a fillable PDF
+# form the user already partially completed) stores those values in the
+# form fields themselves, not in the page's rendered text — so
+# pdfplumber's extract_text() never sees them. This reads those values
+# directly and merges them into the schema as already-filled, without
+# ever overwriting a value OCR/the user already has.
+
+def _read_acroform_values(pdf_path: str) -> dict:
+    try:
+        reader = PdfReader(pdf_path)
+        raw_fields = reader.get_fields() or {}
+    except Exception as e:
+        logger.warning(f"AcroForm read failed ({e})")
+        return {}
+
+    values = {}
+    for name, field in raw_fields.items():
+        value = field.get("/V")
+        if value is None:
+            continue
+        value = str(value).strip()
+        if value:
+            values[name] = value
+
+    return values
+
+
+def _merge_prefilled_values(schema: dict, prefilled: dict) -> dict:
+    if not prefilled:
+        return schema
+
+    normalized_prefilled = {_normalize_token(k): v for k, v in prefilled.items()}
+
+    for field in schema.values():
+        if field.get("value"):
+            # OCR/text already found a value for this field — never
+            # overwrite it with the AcroForm value.
+            continue
+
+        label_key = _normalize_token(field["label"])
+        match = normalized_prefilled.get(label_key)
+
+        if match is None:
+            best_score = 0.0
+            for pf_key, pf_val in normalized_prefilled.items():
+                score = difflib.SequenceMatcher(None, label_key, pf_key).ratio()
+                if score > best_score and score >= 0.8:
+                    best_score = score
+                    match = pf_val
+
+        if match:
+            field["value"] = match
+            field["filled"] = True
+
+    return schema
+
+
+# ---------------------------------------------------------------------------
+# Public entrypoint
 # ---------------------------------------------------------------------------
 
-def extract_form_fields(file_path: str):
+def extract_form_fields(file_path: str, raw_text_override: str = None):
     if not file_path.lower().endswith(".pdf"):
         return {
             "supported": False,
@@ -644,7 +755,7 @@ def extract_form_fields(file_path: str):
 
     logger.info("OCR Request Started")
 
-    text = extract_text(file_path)
+    text = raw_text_override if raw_text_override else extract_text(file_path)
 
     form_name = detect_form_type(text)
 
@@ -654,6 +765,10 @@ def extract_form_fields(file_path: str):
     if schema is None:
         schema = regex_extract(text)
         source = "regex_fallback"
+
+    # Merge in any values already sitting in real fillable PDF form
+    # fields (AcroForm) — never overwrites a value already found above.
+    schema = _merge_prefilled_values(schema, _read_acroform_values(file_path))
 
     schema = attach_coordinates(schema, file_path)
 
