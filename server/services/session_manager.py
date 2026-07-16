@@ -86,7 +86,31 @@ def update_session_fields(
 
         return False
 
-    session["fields"] = fields
+    # Merge instead of blind-overwrite. If /upload fires again on a
+    # session that already has answers (e.g. the user re-selects the
+    # same file, or drags it in again after the debounce window), the
+    # incoming `fields` come straight from a fresh OCR pass and are
+    # blank/original — previously collected conversation answers must
+    # not be wiped out by that. For any field name that already had a
+    # value in this session, keep it unless the new field actually
+    # brings its own value.
+    existing_by_name = {f["name"]: f for f in (session.get("fields") or [])}
+
+    merged_fields = []
+
+    for field in fields:
+        existing = existing_by_name.get(field.get("name"))
+        incoming_has_value = field.get("filled") or field.get("value")
+
+        if existing and (existing.get("filled") or existing.get("value")) and not incoming_has_value:
+            merged = dict(field)
+            merged["value"] = existing.get("value")
+            merged["filled"] = True
+            merged_fields.append(merged)
+        else:
+            merged_fields.append(field)
+
+    session["fields"] = merged_fields
 
     session["pdf_url"] = pdf_url
 
