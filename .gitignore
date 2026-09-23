@@ -1,0 +1,14 @@
+node_modules/
+venv/
+.venv/
+.venv-1/
+server/venv/
+.env
+.env.local
+.DS_Store
+**/.DS_Store
+__pycache__/
+*.pyc
+.next/
+server/uploads/
+server/generated/
